@@ -137,16 +137,35 @@ int fake_tcp::Party::establish_connection_server(const uint32_t& sequence) {
     if (flag == fake_tcp::ACK_FLAG && ack == sequence + 1) {
       std::cout << "[Server] Connection established!" << std::endl;
       storage.emplace_back(new unsigned char[STORAGE_SIZE]);
+      established = true;
       return 0;
-    } else {
-      throw fake_tcp::invalid_header("[Server] Seq and Ack are incorrect!");
+    } else if (flag == fake_tcp::BEGIN_FLAG) {
+      // Send back reset flag.
+      std::cout << "[Server] Not yet established! Try to send a RESET flag..."
+                << std::endl;
+      unsigned char* send_buf = new unsigned char[HEADER_SIZE];
+      bzero(send_buf, HEADER_SIZE);
+
+      // Set message header.
+      *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
+      *((uint8_t*)(send_buf + 1)) = fake_tcp::RST_FLAG;
+      *((uint16_t*)(send_buf + 2)) = 0b0;
+      *((uint32_t*)(send_buf + 4)) = 0b0;
+      *((uint32_t*)(send_buf + 8)) = 0b0;
+
+      bool context = false;
+      do_check(&context, fake_tcp::dst_ip, fake_tcp::src_ip, send_buf,
+               HEADER_SIZE);
+
+      sendto(socket, send_buf, HEADER_SIZE, 0, (struct sockaddr*)(&dst_addr),
+             sizeof(sockaddr));
+
+      return -1;
     }
 
   } catch (const std::exception& e) {
     std::cerr << e.what() << std::endl;
   }
-
-  return -1;
 }
 
 int fake_tcp::Party::establish_connection_client(const uint32_t& sequence) {
@@ -177,8 +196,7 @@ int fake_tcp::Party::establish_connection_client(const uint32_t& sequence) {
       bool context = false;
       do_check(&context, src_ip, dst_ip, send_buf, HEADER_SIZE);
 
-      sendto(socket, send_buf, HEADER_SIZE, 0, (struct sockaddr*)(&dst_addr),
-             sizeof(sockaddr));
+      send(socket, send_buf, HEADER_SIZE, 0);
 
       std::cout << "[Client] Connection established!" << std::endl;
 
@@ -188,62 +206,31 @@ int fake_tcp::Party::establish_connection_client(const uint32_t& sequence) {
     }
   } catch (const std::exception& e) {
     std::cerr << e.what() << std::endl;
+    return -1;
   }
 }
 
 int fake_tcp::Party::connect_to_server() {
-  std::atomic_bool satisfied = false;
-  while (satisfied == false) {
-    // Send an SYN flag header to the server.
-    const uint32_t sequence = uniform_random(sequence_pool);
-    unsigned char* header = new unsigned char[HEADER_SIZE];
-    bzero(header, HEADER_SIZE);
-    *((uint8_t*)(header)) = PROTOCOL_VERSION;
-    *((uint8_t*)(header + 1)) = fake_tcp::SYN_FLAG;
-    *((uint16_t*)(header + 2)) = 0;
-    *((uint32_t*)(header + 4)) = sequence;
-    *((uint32_t*)(header + 8)) = 0;
+  // Send an SYN flag header to the server.
+  const uint32_t sequence = uniform_random(sequence_pool);
+  unsigned char* header = new unsigned char[HEADER_SIZE];
+  bzero(header, HEADER_SIZE);
+  *((uint8_t*)(header)) = PROTOCOL_VERSION;
+  *((uint8_t*)(header + 1)) = fake_tcp::SYN_FLAG;
+  *((uint16_t*)(header + 2)) = 0;
+  *((uint32_t*)(header + 4)) = sequence;
+  *((uint32_t*)(header + 8)) = 0;
 
-    bool context = false;
-    do_check(&context, src_ip, dst_ip, header, HEADER_SIZE);
-    std::cout << "[Client] Checksum: " << *(uint16_t*)(header + 2) << std::endl;
+  bool context = false;
+  do_check(&context, src_ip, dst_ip, header, HEADER_SIZE);
+  std::cout << "[Client] Checksum: " << *(uint16_t*)(header + 2) << std::endl;
+  send(socket, header, HEADER_SIZE, 0);
+
+  while (establish_connection_client(sequence) != 0) {
+    std::cout << "[Client] Waiting for Ack..." << std::endl;
     send(socket, header, HEADER_SIZE, 0);
-
-    std::thread t([&]() {
-      std::cout << "[Client] Waiting for Ack..." << std::endl;
-      std::uint32_t attempt_times = 0;
-
-      std::thread t([&]() {
-        while (++attempt_times <= MAXIMUM_ESTABLISH_ATTEMPT) {
-          // Create a thread and let it receive the ack.
-          std::thread t([&]() {
-            while (satisfied == false) {
-              if (establish_connection_client(sequence) == 0) {
-                satisfied = true;
-              }
-            }
-          });
-          t.detach();
-
-          // Sleep.
-          std::this_thread::sleep_for(TIMEOUT);
-          if (satisfied == true) {
-            break;
-          }
-          std::cout << "[Client] Timed out. Try again." << std::endl;
-        }
-      });
-      t.join();
-
-      if (satisfied == false) {
-        std::cerr << "[Client] Handshake failed!" << std::endl;
-        sequence_pool.clear();
-      }
-    });
-
-    t.detach();
-    std::this_thread::sleep_for(5000ms);
   }
+
   return 0;
 }
 
@@ -263,6 +250,30 @@ void fake_tcp::Party::response_server(unsigned char* message,
   // Print log.
   std::cout << "[Server] Received message: ACK = " << ack << ", SEQ = " << seq
             << std::endl;
+
+  // The server is not ready.
+  if (!established && flag != SYN_FLAG) {
+    std::cout << "[Server] Not yet established! Try to send a RESET flag..."
+              << std::endl;
+    unsigned char* send_buf = new unsigned char[HEADER_SIZE];
+    bzero(send_buf, HEADER_SIZE);
+
+    // Set message header.
+    *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
+    *((uint8_t*)(send_buf + 1)) = fake_tcp::RST_FLAG;
+    *((uint16_t*)(send_buf + 2)) = 0b0;
+    *((uint32_t*)(send_buf + 4)) = 0b0;
+    *((uint32_t*)(send_buf + 8)) = 0b0;
+
+    bool context = false;
+    do_check(&context, fake_tcp::dst_ip, fake_tcp::src_ip, send_buf,
+             HEADER_SIZE);
+
+    sendto(socket, send_buf, HEADER_SIZE, 0, (struct sockaddr*)(&dst_addr),
+           sizeof(sockaddr));
+
+    return;
+  }
 
   /*---------------------
         ERR,  0b1
@@ -293,47 +304,25 @@ void fake_tcp::Party::response_server(unsigned char* message,
       *((uint32_t*)(send_buf + 8)) = (seq + 1) % 0xffffffff;
 
       bool context = false;
-      do_check(&context, fake_tcp::dst_ip, fake_tcp::src_ip, send_buf, HEADER_SIZE);
+      do_check(&context, fake_tcp::dst_ip, fake_tcp::src_ip, send_buf,
+               HEADER_SIZE);
 
-      // Start a timer.
-      std::atomic_bool satisfied = false;
-      // How many times does the server retry to send the packet back to the
-      // client.
-      std::uint32_t attempt_time = 0;
+      sendto(socket, send_buf, HEADER_SIZE, 0, (struct sockaddr*)(&dst_addr),
+             sizeof(sockaddr));
 
-      // Thread t1 is used to resend packet.
-      std::thread t1([&]() {
-        while (satisfied == false &&
-               attempt_time++ <= MAXIMUM_ESTABLISH_ATTEMPT) {
-          // Create an inner thread.
-          // Use signal.
-          sendto(socket, send_buf, HEADER_SIZE, 0,
-                 (struct sockaddr*)(&dst_addr), sizeof(sockaddr));
-          std::this_thread::sleep_for(TIMEOUT);
+      std::this_thread::sleep_for(TIMEOUT);
+      int response = -1;
+      while (response != 0) {
+        response = establish_connection_server(sequence_number);
+        if (response == -1) {
+          run_server();
         }
-
-        if (satisfied == false) {
-          std::cerr << "[Server] Handshake failed. The client does not respond."
-                    << std::endl;
-        }
-      });
-
-      // Thread t2 is a blocking thread that reads from the socket.
-      std::thread t2([&]() {
-        while (true) {
-          if (establish_connection_server(sequence_number) == 0) {
-            satisfied = true;
-            break;
-          }
-        }
-      });
-
-      // Join these two threads to make sure the main thread is blocked by them.
-      t1.join();
-      t2.join();
+        std::this_thread::sleep_for(TIMEOUT);
+      }
 
       return;
     }
+
     case fake_tcp::ACK_FLAG: {
       // This happens when the client needs to disconnect to the server.
       std::cout << "[Server] Ack received. "
@@ -359,7 +348,8 @@ void fake_tcp::Party::response_server(unsigned char* message,
       std::cout << "[Server] Sending back with ACK " << seq + 1 << std::endl;
 
       bool context = false;  // Indicate that we need to set the checksum.
-      do_check(&context, fake_tcp::src_ip, fake_tcp::dst_ip, send_buf, HEADER_SIZE);
+      do_check(&context, fake_tcp::src_ip, fake_tcp::dst_ip, send_buf,
+               HEADER_SIZE);
 
       // Send it back.
       sendto(socket, send_buf, HEADER_SIZE, 0, (struct sockaddr*)(&dst_addr),
@@ -433,10 +423,10 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
 
   // Wait for ACK...
   bool is_lost = false;
+  bool is_reset = false;
   do {
     // Send the message to the server.
-    sendto(socket, send_buf, HEADER_SIZE + file_name.size(), 0,
-           (struct sockaddr*)(&dst_addr), sizeof(sockaddr));
+    send(socket, send_buf, HEADER_SIZE + file_name.size(), 0);
     // Sleep for a while and wait for the server.
     std::this_thread::sleep_for(500ms);
     // Prepare some variables.
@@ -449,6 +439,14 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
     if (message_len > 0) {
       // Status ok, check ack flag.
       uint8_t flag = *((uint8_t*)(recv_buffer + 1));
+      // Received a reset flag: try to reconnect.
+      if (flag == RST_FLAG) {
+        std::cout << "[Client] Received reset flag! The handshake is not yet "
+                     "completed."
+                  << std::endl;
+        is_reset = true;
+        break;
+      }
       if (flag != ACK_FLAG) {
         std::cout << "[Client] Received garbage message. Discard." << std::endl;
         continue;
@@ -491,7 +489,7 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
   } while (true);
 
   // If the server is lost, we re-run the client again.
-  if (is_lost) {
+  if (is_lost || is_reset) {
     run_client();
   }
 }

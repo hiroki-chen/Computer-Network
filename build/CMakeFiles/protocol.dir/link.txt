@@ -1,1 +1,0 @@
-/usr/bin/clang++-10 -g CMakeFiles/protocol.dir/src/main.cc.o CMakeFiles/protocol.dir/src/parser.cc.o CMakeFiles/protocol.dir/src/party.cc.o CMakeFiles/protocol.dir/src/utils.cc.o -o protocol  -lpthread 
