@@ -33,3 +33,9 @@
 
 # Build
 Build
+
+# DS_Store
+.DS_Store
+
+# VS CODE
+.vscode
