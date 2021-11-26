@@ -25,6 +25,7 @@
 #include <cxxopts.hh>
 #include <fstream>
 #include <party.hh>
+#include <queue>
 #include <string>
 #include <unordered_set>
 
@@ -48,6 +49,30 @@ namespace fake_tcp {
  *
  */
 
+static const std::string default_upload_path = "../upload/";
+
+static const std::string default_file_path = "../test/";
+
+template <class T, int max_len, class Container = std::deque<T>>
+class fixed_queue : public std::deque<T> {
+ public:
+  void push(const T& value) {
+    if (this->size() == max_len) {
+      this->c.pop_front();
+    }
+    std::deque<T>::push_back(value);
+  }
+
+  bool find(const T& value) {
+    for (auto iter = this->cbegin(); iter != this->cend(); iter++) {
+      if (*iter == value) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
 // Notes:
 // * The client does not care to which it is communicating because it just wants
 // * to send something. Thus for client, it uses send().
@@ -57,6 +82,8 @@ namespace fake_tcp {
 // * back.
 //
 // * The router should bind to the address **only after** the server is on...
+//
+// * Also note that the router cannot set packet loss rate to 2...
 class Party final {
  private:
   // type == false => This is a client.
@@ -77,7 +104,14 @@ class Party final {
   // We maintain a random number pool to check if a random number is reused.
   std::unordered_set<uint32_t> sequence_pool;
 
+  // Prevent that a buffer is resent.
+  fixed_queue<uint32_t, 0xff> received_sequences;
+
   std::vector<unsigned char*> storage;
+
+  std::vector<std::ofstream> upload_files;
+
+  std::unordered_set<std::string> file_name;  // Files already created.
 
   size_t maximum_storage_size;
 
@@ -91,6 +125,8 @@ class Party final {
   void send_file(const std::string& path_prefix = "./test");
 
   void send_file_information(const std::string& file_name);
+
+  void send_file_content(unsigned char* buffer, const uint32_t& length);
 
   /**
    * @brief When an SYN packet is received, the server will try to establish a

@@ -88,12 +88,18 @@ uint16_t fake_tcp::checksum(unsigned char* header, size_t len) {
 int fake_tcp::handle_recv(const int& socket, unsigned char* recv_buffer,
                           sockaddr_in* local_addr, sockaddr_in* remote_addr) {
   socklen_t size = sizeof(sockaddr_in);
-  size_t message_len = recvfrom(socket, recv_buffer, BUFFER_SIZE, 0,
+  ssize_t message_len = recvfrom(socket, recv_buffer, BUFFER_SIZE, 0,
                                 (struct sockaddr*)remote_addr, &size);
 
   if (message_len == 0) {
+    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+      return -1;
+    }
     throw fake_tcp::connect_closed("The client closed the connection!");
   } else if (message_len < 0) {
+    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+      return -1;
+    }
     throw fake_tcp::socket_error("The socket is dead!");
   } else {
     bool context = true;
@@ -129,10 +135,11 @@ std::vector<std::string> fake_tcp::create_files(
     for (const auto& entry :
          std::filesystem::recursive_directory_iterator(directory)) {
       if (entry.is_regular_file()) {
-        files.emplace_back(entry.path().string());
+        files.emplace_back(entry.path().filename().string());
       }
     }
 
+    std::sort(files.begin(), files.end());
     return files;
   } catch (const std::filesystem::filesystem_error& e) {
     std::cerr << e.what() << std::endl;

@@ -23,7 +23,7 @@
 
 #define HEADER_SIZE sizeof(fake_tcp::ProtocolHeader)
 #define PSEUDO_SIZE sizeof(fake_tcp::PseudoHeader)
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 8192
 #define TIMEOUT 1000ms
 
 #include <arpa/inet.h>
@@ -37,6 +37,7 @@ static const uint8_t ACK_FLAG = 0b100;
 static const uint8_t RST_FLAG = 0b1000;
 static const uint8_t FIN_FLAG = 0b10000;
 static const uint8_t BEGIN_FLAG = 0b100000;
+static const uint8_t FILE_FLAG = 0b10000000;
 
 // Default types.
 static const in_addr_t dst_ip = inet_addr("127.0.0.1");
@@ -65,6 +66,8 @@ struct ProtocolHeader {
   uint32_t sequence_number;
 
   uint32_t acknowledgement_number;
+
+  uint32_t message_len;
 };
 
 enum header_type {
