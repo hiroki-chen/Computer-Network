@@ -17,11 +17,11 @@
 #include <chrono>
 #include <excepts.hh>
 #include <party.hh>
+#include <progress_bar.hh>
 #include <protocol.hh>
 #include <sstream>
 #include <thread>
 #include <timer.hh>
-#include <progress_bar.hh>
 #include <utils.hh>
 #include <vector>
 
@@ -93,6 +93,9 @@ void fake_tcp::Party::run_server(void) {
   std::cout << "The server is running!" << std::endl;
   ssize_t message_len = 0;
 
+  // Delete upload folder.
+  std::system("rm ../upload/*");
+
   do {
     try {
       // Prepare necessary variables for receiving the message.
@@ -124,6 +127,7 @@ void fake_tcp::Party::run_client(void) {
   // Send files.
   send_file("../test");
   // Close connection.
+  exit(0);
 }
 
 int fake_tcp::Party::establish_connection_server(const uint32_t& sequence) {
@@ -418,8 +422,8 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
 
   // Set default timeout for the socket. Just for convenience.
   struct timeval timeout;
-  timeout.tv_sec = 1;
-  timeout.tv_usec = 0;
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 1000000;
   // Try to set the timeout.
   setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
@@ -435,8 +439,9 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
 
       // Create a buffer. Batch size is 1024 bytes. (1KB)
       unsigned char* send_buf = new unsigned char[BUFFER_SIZE - HEADER_SIZE];
-      std::cout << "[Client] Sending file " << files[i] << " with size "
-                << file_size << " bytes." << std::endl;
+      std::cout << std::endl
+                << std::flush << "[Client] Sending file " << files[i]
+                << " with size " << file_size << " bytes." << std::endl;
 
       // Step 1: Send the file information to the server.
       send_file_information(files[i]);
@@ -446,6 +451,8 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
       // Create a progress bar.
       ProgressBar bar(file_size, files[i].data());
 
+      // Set a time recorder.
+      auto begin = std::chrono::high_resolution_clock::now();
       while (file) {
         bzero(send_buf, BUFFER_SIZE - HEADER_SIZE);
         // Read 1024 - HEADERSIZE bytes from the file.
@@ -466,6 +473,14 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
         read_size += count;
         bar.Progressed(read_size);
       }
+      auto end = std::chrono::high_resolution_clock::now();
+      double elapsed = std::chrono::duration<double>(end - begin).count();
+
+      std::cout << std::endl
+                << std::flush << "\033[1;31m[Client] Successfully sent a file!"
+                << " Time used: " << elapsed << " s."
+                << " Speed: " << file_size / elapsed << " B/s.\033[0m"
+                << std::endl;
     }
   }
 }

@@ -24,7 +24,7 @@
 #define HEADER_SIZE sizeof(fake_tcp::ProtocolHeader)
 #define PSEUDO_SIZE sizeof(fake_tcp::PseudoHeader)
 #define BUFFER_SIZE 8192
-#define TIMEOUT 1000ms
+#define TIMEOUT 300ms
 
 #include <arpa/inet.h>
 #include <cstdint>
