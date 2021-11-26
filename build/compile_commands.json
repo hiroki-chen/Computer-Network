@@ -1,0 +1,22 @@
+[
+{
+  "directory": "/home/chb/computer_network/build",
+  "command": "/usr/bin/clang++-10  -I/home/chb/computer_network/include -g -std=c++17 -o CMakeFiles/protocol.dir/src/main.cc.o -c /home/chb/computer_network/src/main.cc",
+  "file": "/home/chb/computer_network/src/main.cc"
+},
+{
+  "directory": "/home/chb/computer_network/build",
+  "command": "/usr/bin/clang++-10  -I/home/chb/computer_network/include -g -std=c++17 -o CMakeFiles/protocol.dir/src/parser.cc.o -c /home/chb/computer_network/src/parser.cc",
+  "file": "/home/chb/computer_network/src/parser.cc"
+},
+{
+  "directory": "/home/chb/computer_network/build",
+  "command": "/usr/bin/clang++-10  -I/home/chb/computer_network/include -g -std=c++17 -o CMakeFiles/protocol.dir/src/party.cc.o -c /home/chb/computer_network/src/party.cc",
+  "file": "/home/chb/computer_network/src/party.cc"
+},
+{
+  "directory": "/home/chb/computer_network/build",
+  "command": "/usr/bin/clang++-10  -I/home/chb/computer_network/include -g -std=c++17 -o CMakeFiles/protocol.dir/src/utils.cc.o -c /home/chb/computer_network/src/utils.cc",
+  "file": "/home/chb/computer_network/src/utils.cc"
+}
+]

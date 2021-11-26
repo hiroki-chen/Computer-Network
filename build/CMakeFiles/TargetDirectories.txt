@@ -1,0 +1,4 @@
+/home/chb/computer_network/build/CMakeFiles/edit_cache.dir
+/home/chb/computer_network/build/CMakeFiles/test.dir
+/home/chb/computer_network/build/CMakeFiles/rebuild_cache.dir
+/home/chb/computer_network/build/CMakeFiles/protocol.dir
