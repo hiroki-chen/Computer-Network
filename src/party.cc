@@ -90,20 +90,22 @@ void fake_tcp::Party::run(void) {
 void fake_tcp::Party::run_server(void) {
   // Message_len will be a member of fake_tcp::PseudoHeader.
   std::cout << "The server is running!" << std::endl;
-  uint16_t message_len = 0;
+  ssize_t message_len = 0;
 
   do {
     try {
+      // Prepare necessary variables for receiving the message.
       unsigned char* recv_buf = new unsigned char[BUFFER_SIZE];
       bzero(recv_buf, BUFFER_SIZE);
       handle_recv(socket, recv_buf, &addr, &dst_addr);
 
       // Extract source ip from the saddr struct.
-      uint32_t source_ip = ((struct sockaddr_in*)(&addr))->sin_addr.s_addr;
-      uint32_t destination_ip = dst_addr.sin_addr.s_addr;
+      // uint32_t source_ip = ((struct sockaddr_in*)(&addr))->sin_addr.s_addr;
+      // uint32_t destination_ip = dst_addr.sin_addr.s_addr;
+      // Router is intercepting information...
 
       // Checksum ok. Response to the client.
-      response_server(recv_buf, message_len, source_ip, destination_ip);
+      response_server(recv_buf, message_len, src_ip, dst_ip);
     } catch (const fake_tcp::invalid_header& e) {
       std::cerr << e.what() << std::endl;
       continue;
@@ -132,7 +134,6 @@ int fake_tcp::Party::establish_connection_server(const uint32_t& sequence) {
     const uint32_t seq = *((uint32_t*)(recv_buffer + 4));
     const uint32_t ack = *((uint32_t*)(recv_buffer + 8));
 
-    std::cout << seq << ", " << ack << std::endl;
     if (flag == fake_tcp::ACK_FLAG && ack == sequence + 1) {
       std::cout << "[Server] Connection established!" << std::endl;
       storage.emplace_back(new unsigned char[STORAGE_SIZE]);
@@ -257,8 +258,11 @@ void fake_tcp::Party::response_server(unsigned char* message,
   // we can omit it.
   const uint32_t seq = *((uint32_t*)(message + 4));
   const uint32_t ack = *((uint32_t*)(message + 8));
-  // Add to pool
+  // Add to pool to avoid repeated sequence number.
   sequence_pool.insert(seq);
+  // Print log.
+  std::cout << "[Server] Received message: ACK = " << ack << ", SEQ = " << seq
+            << std::endl;
 
   /*---------------------
         ERR,  0b1
@@ -269,17 +273,19 @@ void fake_tcp::Party::response_server(unsigned char* message,
   ----------------------*/
   switch (flag) {
     case fake_tcp::ERR_FLAG: {
+      // The peer sent an error.
       throw fake_tcp::invalid_header(
           "Invalid header! The message is discarded!");
     }
     case fake_tcp::SYN_FLAG: {
+      // Begin to connect.
       std::cout << "[Server] Syn request received. "
                 << "Sending back Seq and Ack..." << std::endl;
-      // No body.
       unsigned char* send_buf = new unsigned char[HEADER_SIZE];
       bzero(send_buf, HEADER_SIZE);
       const uint32_t sequence_number = uniform_random(sequence_pool);
 
+      // Set message header.
       *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
       *((uint8_t*)(send_buf + 1)) = fake_tcp::ACK_FLAG;
       *((uint16_t*)(send_buf + 2)) = 0b0;
@@ -287,10 +293,7 @@ void fake_tcp::Party::response_server(unsigned char* message,
       *((uint32_t*)(send_buf + 8)) = (seq + 1) % 0xffffffff;
 
       bool context = false;
-      do_check(&context, dst_ip, src_ip, send_buf, HEADER_SIZE);
-
-      sendto(socket, send_buf, HEADER_SIZE, 0, (struct sockaddr*)(&dst_addr),
-             sizeof(sockaddr));
+      do_check(&context, fake_tcp::dst_ip, fake_tcp::src_ip, send_buf, HEADER_SIZE);
 
       // Start a timer.
       std::atomic_bool satisfied = false;
@@ -317,13 +320,15 @@ void fake_tcp::Party::response_server(unsigned char* message,
 
       // Thread t2 is a blocking thread that reads from the socket.
       std::thread t2([&]() {
-        while (satisfied == false) {
+        while (true) {
           if (establish_connection_server(sequence_number) == 0) {
             satisfied = true;
+            break;
           }
         }
       });
 
+      // Join these two threads to make sure the main thread is blocked by them.
       t1.join();
       t2.join();
 
@@ -335,13 +340,30 @@ void fake_tcp::Party::response_server(unsigned char* message,
                 << "Sending back Seq and Ack..." << std::endl;
     }
     case fake_tcp::BEGIN_FLAG: {
-      std::cout << "HELLO WORLD!\n";
-
       // Extract file information.
       const std::string file_name(
           reinterpret_cast<char*>(message + HEADER_SIZE));
       std::cout << "[Server] The client wants to upload file " << file_name
                 << "!" << std::endl;
+
+      // Send back the ack flag.
+      unsigned char* send_buf = new unsigned char[HEADER_SIZE];
+      bzero(send_buf, HEADER_SIZE);
+      // Set message header.
+      *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
+      *((uint8_t*)(send_buf + 1)) = fake_tcp::ACK_FLAG;
+      *((uint16_t*)(send_buf + 2)) = 0b0;
+      *((uint32_t*)(send_buf + 4)) = seq;
+      *((uint32_t*)(send_buf + 8)) = seq + 1;
+
+      std::cout << "[Server] Sending back with ACK " << seq + 1 << std::endl;
+
+      bool context = false;  // Indicate that we need to set the checksum.
+      do_check(&context, fake_tcp::src_ip, fake_tcp::dst_ip, send_buf, HEADER_SIZE);
+
+      // Send it back.
+      sendto(socket, send_buf, HEADER_SIZE, 0, (struct sockaddr*)(&dst_addr),
+             sizeof(sockaddr));
     }
   }
 }
@@ -357,12 +379,12 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
   // Please make sure that the path is a directory.
   std::vector<std::string> files = create_files(path_prefix);
 
-  // Set default timeout for the socket. For my convenience.
+  // Set default timeout for the socket. Just for convenience.
   struct timeval timeout;
   timeout.tv_sec = 1;
   timeout.tv_usec = 0;
   // Try to set the timeout.
-  setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
   for (uint32_t i = 0; i < files.size(); i++) {
     // Check if the file is valid.
@@ -380,6 +402,9 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
 
         // Step 1: Send the file information to the server.
         send_file_information(files[i]);
+
+        // Step 2: Begin to send file content to the server. We use the
+        // stop-and-wait mechanism.
       }
     }
   }
@@ -391,6 +416,7 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
   bzero(send_buf, HEADER_SIZE + file_name.size());
   const uint32_t sequence_number = uniform_random(sequence_pool);
 
+  // Set message header.
   *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
   *((uint8_t*)(send_buf + 1)) = fake_tcp::BEGIN_FLAG;
   *((uint16_t*)(send_buf + 2)) = 0b0;
@@ -406,15 +432,66 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
   do_check(&context, dst_ip, src_ip, send_buf, HEADER_SIZE + file_name.size());
 
   // Wait for ACK...
-  
-  sendto(socket, send_buf, HEADER_SIZE + file_name.size(), 0,
-         (struct sockaddr*)(&dst_addr), sizeof(sockaddr));
+  bool is_lost = false;
+  do {
+    // Send the message to the server.
+    sendto(socket, send_buf, HEADER_SIZE + file_name.size(), 0,
+           (struct sockaddr*)(&dst_addr), sizeof(sockaddr));
+    // Sleep for a while and wait for the server.
+    std::this_thread::sleep_for(500ms);
+    // Prepare some variables.
+    ssize_t message_len = 0;
+    unsigned char* recv_buffer = new unsigned char[BUFFER_SIZE];
 
-  std::atomic_bool satisfied = false;
-  std::thread t([&]() {
-    std::cout << "[Client] Waiting for Ack..." << std::endl;
-    
-  });
+    // Receive from socket.
+    message_len = recv(socket, recv_buffer, BUFFER_SIZE, 0);
+    // Check status.
+    if (message_len > 0) {
+      // Status ok, check ack flag.
+      uint8_t flag = *((uint8_t*)(recv_buffer + 1));
+      if (flag != ACK_FLAG) {
+        std::cout << "[Client] Received garbage message. Discard." << std::endl;
+        continue;
+      } else {
+        // ACK received. Check validity.
+        uint32_t ack = *((uint32_t*)(recv_buffer + 8));
+        if (ack != sequence_number + 1) {
+          std::cout << "ACK: " << ack << "Seq: " << sequence_number
+                    << std::endl;
+          std::cout << "[Client] Server sent an invalid ack to the client!"
+                    << std::endl;
+          continue;
+        } else {
+          // ACK received and it is valid!
+          std::cout << "[Client] Successfully sent file information!"
+                    << std::endl;
+          break;
+        }
+      }
+    } else if (message_len < 0) {
+      // The socket may have timed out.
+      // Check errno.
+      if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        std::cout << "[Client] The server does not respond!" << std::endl;
+        continue;
+      } else {
+        std::cout << "[Client] Internal error with the socket! Terminating..."
+                  << std::endl;
+        exit(1);
+      }
+    } else {
+      // The peer closed the connection. We should invoke establish_connection
+      // and then break.
+      std::cout << "[Client] The server is lost... Trying to reconnect!"
+                << std::endl;
+      // Set the flag to be true.
+      is_lost = true;
+      break;
+    }
+  } while (true);
 
-  t.join();
+  // If the server is lost, we re-run the client again.
+  if (is_lost) {
+    run_client();
+  }
 }

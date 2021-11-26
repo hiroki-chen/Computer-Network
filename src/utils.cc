@@ -41,28 +41,28 @@ uint32_t fake_tcp::uniform_random(std::unordered_set<uint32_t>& sequence_pool) {
 }
 
 void fake_tcp::do_check(bool* context, const uint32_t& src_addr,
-                        const uint32_t& dst_addr, unsigned char* recv_buf,
+                        const uint32_t& dst_addr, unsigned char* buffer,
                         const size_t& message_len) {
-  fake_tcp::PseudoHeader pseudo_header_recv;
-  memset(&pseudo_header_recv, 0, PSEUDO_SIZE);
-  pseudo_header_recv.saddr = src_addr;
-  pseudo_header_recv.daddr = dst_addr;
-  pseudo_header_recv.protocol = PROTOCOL_VERSION;
-  pseudo_header_recv.packet_len = message_len;
+  fake_tcp::PseudoHeader pseudo_header;
+  memset(&pseudo_header, 0, PSEUDO_SIZE);
+  pseudo_header.saddr = src_addr;
+  pseudo_header.daddr = dst_addr;
+  pseudo_header.protocol = PROTOCOL_VERSION;
+  pseudo_header.packet_len = message_len;
 
   // Create a full header.
-  unsigned char* data_recv = new unsigned char[PSEUDO_SIZE + message_len];
-  memset(data_recv, 0, PSEUDO_SIZE + message_len);
-  memcpy(data_recv, &pseudo_header_recv, PSEUDO_SIZE);
-  memcpy(data_recv + PSEUDO_SIZE, recv_buf, message_len);
+  unsigned char* data = new unsigned char[PSEUDO_SIZE + message_len];
+  memset(data, 0, PSEUDO_SIZE + message_len);
+  memcpy(data, &pseudo_header, PSEUDO_SIZE);
+  memcpy(data + PSEUDO_SIZE, buffer, message_len);
 
   // Check whether the header is valid or not.
-  uint16_t res = checksum(data_recv, PSEUDO_SIZE + message_len);
+  uint16_t res = checksum(data, PSEUDO_SIZE + message_len);
 
   if (*context == true) {
     *context = (res == 0);
   } else {
-    *((uint16_t*)(recv_buf + 2)) = res;
+    *((uint16_t*)(buffer + 2)) = res;
   }
 }
 
@@ -97,9 +97,9 @@ int fake_tcp::handle_recv(const int& socket, unsigned char* recv_buffer,
     throw fake_tcp::socket_error("The socket is dead!");
   } else {
     bool context = true;
-    uint32_t source_ip = remote_addr->sin_addr.s_addr;
-    uint32_t destination_ip = local_addr->sin_addr.s_addr;
-    do_check(&context, source_ip, destination_ip, recv_buffer, message_len);
+    //uint32_t source_ip = remote_addr->sin_addr.s_addr;
+    //uint32_t destination_ip = local_addr->sin_addr.s_addr;
+    do_check(&context, fake_tcp::src_ip, fake_tcp::dst_ip, recv_buffer, message_len);
 
     if (context == false) {
       throw fake_tcp::invalid_header("Checksum is incorrect!");
