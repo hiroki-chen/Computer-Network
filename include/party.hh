@@ -102,7 +102,15 @@ class Party final {
   struct sockaddr_in dst_addr;
 
   // We maintain a random number pool to check if a random number is reused.
-  std::unordered_set<uint32_t> sequence_pool;
+  // std::unordered_set<uint32_t> sequence_pool;
+
+  uint32_t cur_sequence;
+
+  uint32_t next_sequence;
+
+  uint32_t window_left, window_right;
+
+  uint32_t window_size;
 
   // Prevent that a buffer is resent.
   fixed_queue<uint32_t, 0xff> received_sequences;

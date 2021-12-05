@@ -89,7 +89,7 @@ int fake_tcp::handle_recv(const int& socket, unsigned char* recv_buffer,
                           sockaddr_in* local_addr, sockaddr_in* remote_addr) {
   socklen_t size = sizeof(sockaddr_in);
   ssize_t message_len = recvfrom(socket, recv_buffer, BUFFER_SIZE, 0,
-                                (struct sockaddr*)remote_addr, &size);
+                                 (struct sockaddr*)remote_addr, &size);
 
   if (message_len == 0) {
     if (errno == EWOULDBLOCK || errno == EAGAIN) {
@@ -103,9 +103,10 @@ int fake_tcp::handle_recv(const int& socket, unsigned char* recv_buffer,
     throw fake_tcp::socket_error("The socket is dead!");
   } else {
     bool context = true;
-    //uint32_t source_ip = remote_addr->sin_addr.s_addr;
-    //uint32_t destination_ip = local_addr->sin_addr.s_addr;
-    do_check(&context, fake_tcp::src_ip, fake_tcp::dst_ip, recv_buffer, message_len);
+    // uint32_t source_ip = remote_addr->sin_addr.s_addr;
+    // uint32_t destination_ip = local_addr->sin_addr.s_addr;
+    do_check(&context, fake_tcp::src_ip, fake_tcp::dst_ip, recv_buffer,
+             message_len);
 
     if (context == false) {
       throw fake_tcp::invalid_header("Checksum is incorrect!");

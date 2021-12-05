@@ -30,7 +30,12 @@ using namespace std::literals::chrono_literals;
 fake_tcp::Party::Party(const cxxopts::ParseResult& result)
     : type(result["server"].as<bool>()),
       input_file(new std::ifstream(result["input"].as<std::string>())),
-      socket(-1) {
+      socket(-1),
+      cur_sequence(0ul),
+      window_left(0ul),
+      window_right(MAXIMUM_WINDOW_SIZE),
+      window_size(MAXIMUM_WINDOW_SIZE),
+      next_sequence(0ul) {
   // Get necessary parameters.
   const std::string address = result["address"].as<std::string>();
   const std::string port = result["port"].as<std::string>();
@@ -193,7 +198,7 @@ int fake_tcp::Party::establish_connection_client(const uint32_t& sequence) {
 
       unsigned char* send_buf = new unsigned char[HEADER_SIZE];
       bzero(send_buf, HEADER_SIZE);
-      const uint32_t sequence_number = uniform_random(sequence_pool);
+      const uint32_t sequence_number = cur_sequence++ % UINT32_MAX;
 
       *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
       *((uint8_t*)(send_buf + 1)) = fake_tcp::ACK_FLAG;
@@ -221,7 +226,7 @@ int fake_tcp::Party::establish_connection_client(const uint32_t& sequence) {
 
 int fake_tcp::Party::connect_to_server() {
   // Send an SYN flag header to the server.
-  const uint32_t sequence = uniform_random(sequence_pool);
+  const uint32_t sequence = cur_sequence++ % UINT32_MAX;
   unsigned char* header = new unsigned char[HEADER_SIZE];
   bzero(header, HEADER_SIZE);
   *((uint8_t*)(header)) = PROTOCOL_VERSION;
@@ -254,8 +259,6 @@ void fake_tcp::Party::response_server(unsigned char* message,
   // we can omit it.
   const uint32_t seq = *((uint32_t*)(message + 4));
   const uint32_t ack = *((uint32_t*)(message + 8));
-  // Add to pool to avoid repeated sequence number.
-  sequence_pool.insert(seq);
   // Print log.
   std::cout << "[Server] Received message: ACK = " << ack << ", SEQ = " << seq
             << std::endl;
@@ -305,7 +308,7 @@ void fake_tcp::Party::response_server(unsigned char* message,
                 << "Sending back Seq and Ack..." << std::endl;
       unsigned char* send_buf = new unsigned char[HEADER_SIZE];
       bzero(send_buf, HEADER_SIZE);
-      const uint32_t sequence_number = uniform_random(sequence_pool);
+      const uint32_t sequence_number = cur_sequence++ % UINT32_MAX;
 
       // Set message header.
       *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
@@ -336,6 +339,12 @@ void fake_tcp::Party::response_server(unsigned char* message,
 
     // The client is sending the file...
     case fake_tcp::FILE_FLAG: {
+      // Set default timeout for the socket. Just for convenience.
+      struct timeval timeout;
+      timeout.tv_sec = 0;
+      timeout.tv_usec = 1000000;
+      // Try to set the timeout.
+      setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
       // The message is received again. Throw it away.
       if (received_sequences.find(seq)) {
         std::cout << "[Server] Received repeated batch of the message."
@@ -344,6 +353,15 @@ void fake_tcp::Party::response_server(unsigned char* message,
       }
 
       std::cout << "[Server] Received one batch of the message." << std::endl;
+      // Check if this message is out of order.
+      if (next_sequence != seq) {
+        std::cout
+            << "[Server] Sequence does not match the expected one. Discard."
+            << std::endl;
+        return;
+      }
+      // Increment the next sequence expected.
+      next_sequence++;
       // Push to the queue.
       received_sequences.push_back(seq);
       // Write to the file.
@@ -377,6 +395,8 @@ void fake_tcp::Party::response_server(unsigned char* message,
       std::cout << "[Server] The client wants to upload file " << file_name
                 << "!" << std::endl;
 
+      received_sequences.clear();
+
       // Send back the ack flag.
       unsigned char* send_buf = new unsigned char[HEADER_SIZE];
       bzero(send_buf, HEADER_SIZE);
@@ -386,6 +406,8 @@ void fake_tcp::Party::response_server(unsigned char* message,
       *((uint16_t*)(send_buf + 2)) = 0b0;
       *((uint32_t*)(send_buf + 4)) = seq;
       *((uint32_t*)(send_buf + 8)) = seq + 1;
+      // Set window size.
+      *((uint32_t*)(send_buf + 16)) = MAXIMUM_WINDOW_SIZE;
 
       std::cout << "[Server] Sending back with ACK " << seq + 1 << std::endl;
 
@@ -405,6 +427,9 @@ void fake_tcp::Party::response_server(unsigned char* message,
                           std::ofstream::binary | std::ofstream::out));
         std::cout << "[Server] Created new file!" << std::endl;
       }
+      next_sequence = 1ul;
+
+      return;
     }
   }
 }
@@ -443,35 +468,46 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
                 << std::flush << "[Client] Sending file " << files[i]
                 << " with size " << file_size << " bytes." << std::endl;
 
+      cur_sequence = 0ul;
+
       // Step 1: Send the file information to the server.
       send_file_information(files[i]);
 
       std::atomic<std::streamsize> read_size = 0;
 
       // Create a progress bar.
-      ProgressBar bar(file_size, files[i].data());
+      // ProgressBar bar(file_size, files[i].data());
 
       // Set a time recorder.
       auto begin = std::chrono::high_resolution_clock::now();
-      while (file) {
-        bzero(send_buf, BUFFER_SIZE - HEADER_SIZE);
-        // Read 1024 - HEADERSIZE bytes from the file.
-        // Reserve some place for the buffer.
-        file.read(reinterpret_cast<char*>(send_buf), BUFFER_SIZE - HEADER_SIZE);
+      bool finish = false;
+      while (!finish) {
+        const uint32_t packet_num = (window_right - window_left) / BUFFER_SIZE;
 
-        std::streamsize count = file.gcount();
-        // If nothing has been read, break
-        if (!count) {
-          break;
+        for (uint32_t i = 0; i < packet_num; i++) {
+          bzero(send_buf, BUFFER_SIZE - HEADER_SIZE);
+          // Read 1024 - HEADERSIZE bytes from the file.
+          // Reserve some place for the buffer.
+          file.read(reinterpret_cast<char*>(send_buf),
+                    BUFFER_SIZE - HEADER_SIZE);
+
+          std::streamsize count = file.gcount();
+          // If nothing has been read, break
+          if (!count) {
+            finish = true;
+            break;
+          }
+
+          // Step 2: Begin to send file content to the server.
+          // In Lab2, we use a sliding window.
+          send_file_content(send_buf, count);
+
+          // Increment progress bar.
+          read_size += count;
+          // bar.Progressed(read_size);
         }
 
-        // Step 2: Begin to send file content to the server. We use the
-        // stop-and-wait mechanism.
-        send_file_content(send_buf, count);
-
-        // Increment progress bar.
-        read_size += count;
-        bar.Progressed(read_size);
+        // TODO: Wait for the window size...
       }
       auto end = std::chrono::high_resolution_clock::now();
       double elapsed = std::chrono::duration<double>(end - begin).count();
@@ -489,7 +525,7 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
   // The buffer contains the filename.
   unsigned char* send_buf = new unsigned char[HEADER_SIZE + file_name.size()];
   bzero(send_buf, HEADER_SIZE + file_name.size());
-  const uint32_t sequence_number = uniform_random(sequence_pool);
+  const uint32_t sequence_number = cur_sequence++ % UINT32_MAX;
 
   // Set message header.
   *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
@@ -513,7 +549,7 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
     // Send the message to the server.
     send(socket, send_buf, HEADER_SIZE + file_name.size(), 0);
     // Sleep for a while and wait for the server.
-    std::this_thread::sleep_for(500ms);
+    //  std::this_thread::sleep_for(500ms);
     // Prepare some variables.
     ssize_t message_len = 0;
     unsigned char* recv_buffer = new unsigned char[BUFFER_SIZE];
@@ -539,15 +575,18 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
         // ACK received. Check validity.
         uint32_t ack = *((uint32_t*)(recv_buffer + 8));
         if (ack != sequence_number + 1) {
-          std::cout << "ACK: " << ack << "Seq: " << sequence_number
+          std::cout << "ACK: " << ack << " Seq: " << sequence_number
                     << std::endl;
           std::cout << "[Client] Server sent an invalid ack to the client!"
                     << std::endl;
           continue;
         } else {
           // ACK received and it is valid!
-          // std::cout << "[Client] Successfully sent file information!"
-          //           << std::endl;
+          std::cout << "[Client] Successfully sent file information!"
+                    << std::endl;
+          const uint32_t window_size_cur = *((uint32_t*)(recv_buffer + 16));
+          std::cout << "[Client] Current window size is " << window_size_cur
+                    << std::endl;
           break;
         }
       }
@@ -584,8 +623,7 @@ void fake_tcp::Party::send_file_content(unsigned char* buffer,
   // Build a send buffer.
   unsigned char* send_buf = new unsigned char[length + HEADER_SIZE];
   bzero(send_buf, HEADER_SIZE + length);
-  const uint32_t sequence_number = uniform_random(sequence_pool);
-  sequence_pool.insert(sequence_number);
+  const uint32_t sequence_number = cur_sequence++ % UINT32_MAX;
 
   // Set message header.
   *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
@@ -599,34 +637,9 @@ void fake_tcp::Party::send_file_content(unsigned char* buffer,
   bool context = false;
   do_check(&context, src_ip, dst_ip, send_buf, length + HEADER_SIZE);
 
-  // First we send a packet, and then wait for the server's response.
-  while (true) {
-    send(socket, send_buf, length + HEADER_SIZE, 0);
-    // A timer.
-    std::this_thread::sleep_for(500ms);
-    unsigned char* header = new unsigned char[BUFFER_SIZE];
-    bzero(header, BUFFER_SIZE);
-    // ACK ?
-    if (handle_recv(socket, header, &addr, &dst_addr) == 0) {
-      const uint8_t flag = *(uint8_t*)(header + 1);
-      const uint32_t ack = *(uint32_t*)(header + 8);
-
-      if (flag == ACK_FLAG && ack == sequence_number + 1) {
-        break;
-      } else if (flag == RST_FLAG) {
-        std::cout << "[Client] Received reset flag! The handshake is not yet "
-                     "completed."
-                  << std::endl;
-
-        run_client();
-        break;
-      } else {
-        std::cout << "[Client] Received redudant flags. Throw it away."
-                  << std::endl;
-        continue;
-      }
-    }
-  }
+  send(socket, send_buf, length + HEADER_SIZE, 0);
+  // A timer.
+  std::this_thread::sleep_for(TIMEOUT);
 }
 
 fake_tcp::Party::~Party() {

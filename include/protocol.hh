@@ -23,8 +23,9 @@
 
 #define HEADER_SIZE sizeof(fake_tcp::ProtocolHeader)
 #define PSEUDO_SIZE sizeof(fake_tcp::PseudoHeader)
-#define BUFFER_SIZE 8192
-#define TIMEOUT 300ms
+#define BUFFER_SIZE 8096
+#define MAXIMUM_WINDOW_SIZE 0x10 * BUFFER_SIZE
+#define TIMEOUT 20ms
 
 #include <arpa/inet.h>
 #include <cstdint>
@@ -68,6 +69,8 @@ struct ProtocolHeader {
   uint32_t acknowledgement_number;
 
   uint32_t message_len;
+
+  uint32_t window_size;
 };
 
 enum header_type {
