@@ -134,14 +134,21 @@ class Party final {
 
   void send_file_information(const std::string& file_name);
 
-  void send_file_content(unsigned char* buffer, const uint32_t& length);
+  void send_file_content(
+      const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
+      const uint32_t& start);
 
-  /**
-   * @brief When an SYN packet is received, the server will try to establish a
-   * connection with the client.
-   *
-   */
-  int establish_connection_server(const uint32_t& sequence);
+  void handle_batch_ack(
+      const uint32_t& left, const uint32_t& right,
+      const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
+      const uint32_t& cur_sequence);
+
+      /**
+       * @brief When an SYN packet is received, the server will try to establish
+       * a connection with the client.
+       *
+       */
+      int establish_connection_server(const uint32_t& sequence);
 
   int establish_connection_client(const uint32_t& sequence);
 

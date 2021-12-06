@@ -27,6 +27,64 @@
 
 using namespace std::literals::chrono_literals;
 
+static std::unordered_map<uint32_t, bool> get_hashmap(const uint32_t& left,
+                                                      const uint32_t& right) {
+  std::unordered_map<uint32_t, bool> ret;
+
+  for (uint32_t i = left; i <= right; i++) {
+    ret[i] = false;
+  }
+
+  return ret;
+}
+
+void fake_tcp::Party::handle_batch_ack(
+    const uint32_t& left, const uint32_t& right,
+    const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
+    const uint32_t& cur_sequence) {
+  uint32_t acked = 0;
+  std::unordered_map<uint32_t, bool> map = std::move(get_hashmap(left, right));
+
+  while (acked < map.size()) {
+    send_file_content(buffer_, cur_sequence);
+    std::this_thread::sleep_for(2 * TIMEOUT);
+
+    uint32_t attempted = 0;
+
+    while (attempted++ <= 5 * map.size()) {
+      unsigned char* recv_buf = new unsigned char[HEADER_SIZE];
+      if (handle_recv(socket, recv_buf, &addr, &dst_addr) == 0) {
+        // Status ok, check ack flag.
+        uint8_t flag = *((uint8_t*)(recv_buf + 1));
+
+        if (flag != ACK_FLAG) {
+          std::cout << "[Client] Received garbage message. Discard."
+                    << std::endl;
+        } else {
+          // ACK received. Check validity.
+          uint32_t ack = *((uint32_t*)(recv_buf + 8));
+
+          if (map.count(ack) == 0) {
+            std::cout << "[Client] Received garbage message. Discard."
+                      << std::endl;
+          } else if (map[ack] == true) {
+            std::cout << "[Client] Received repeated ack. Discard."
+                      << std::endl;
+          } else {
+            acked++;
+            map[ack] = true;
+
+            if (ack == map.size()) {
+              return;
+            }
+            std::cout << "[Client] Received valid ack!" << std::endl;
+          }
+        }
+      }
+    }
+  }
+}
+
 fake_tcp::Party::Party(const cxxopts::ParseResult& result)
     : type(result["server"].as<bool>()),
       input_file(new std::ifstream(result["input"].as<std::string>())),
@@ -109,9 +167,9 @@ void fake_tcp::Party::run_server(void) {
       handle_recv(socket, recv_buf, &addr, &dst_addr);
 
       // Extract source ip from the saddr struct.
-      // uint32_t source_ip = ((struct sockaddr_in*)(&addr))->sin_addr.s_addr;
-      // uint32_t destination_ip = dst_addr.sin_addr.s_addr;
-      // Router is intercepting information...
+      // uint32_t source_ip = ((struct
+      // sockaddr_in*)(&addr))->sin_addr.s_addr; uint32_t destination_ip =
+      // dst_addr.sin_addr.s_addr; Router is intercepting information...
 
       // Checksum ok. Response to the client.
       response_server(recv_buf, message_len, src_ip, dst_ip);
@@ -484,30 +542,38 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
       while (!finish) {
         const uint32_t packet_num = (window_right - window_left) / BUFFER_SIZE;
 
+        // Create a buffer pool.
+        std::vector<std::pair<unsigned char*, uint32_t>> buffer_;
+
         for (uint32_t i = 0; i < packet_num; i++) {
           bzero(send_buf, BUFFER_SIZE - HEADER_SIZE);
           // Read 1024 - HEADERSIZE bytes from the file.
           // Reserve some place for the buffer.
           file.read(reinterpret_cast<char*>(send_buf),
                     BUFFER_SIZE - HEADER_SIZE);
-
+          unsigned char* buf = new unsigned char[BUFFER_SIZE - HEADER_SIZE];
+          memcpy(buf, send_buf, BUFFER_SIZE - HEADER_SIZE);
           std::streamsize count = file.gcount();
           // If nothing has been read, break
           if (!count) {
             finish = true;
             break;
           }
-
-          // Step 2: Begin to send file content to the server.
-          // In Lab2, we use a sliding window.
-          send_file_content(send_buf, count);
-
+          buffer_.emplace_back(std::make_pair(buf, count));
           // Increment progress bar.
           read_size += count;
           // bar.Progressed(read_size);
         }
 
-        // TODO: Wait for the window size...
+        // Step 2: Begin to send file content to the server.
+        // In Lab2, we use a sliding window.
+        // Set and current sent window.
+        uint32_t left = cur_sequence;
+        uint32_t right = cur_sequence + buffer_.size() - 1;
+
+        handle_batch_ack(left, right, buffer_, cur_sequence);
+        // Increment.
+        cur_sequence += buffer_.size();
       }
       auto end = std::chrono::high_resolution_clock::now();
       double elapsed = std::chrono::duration<double>(end - begin).count();
@@ -602,8 +668,8 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
         exit(1);
       }
     } else {
-      // The peer closed the connection. We should invoke establish_connection
-      // and then break.
+      // The peer closed the connection. We should invoke
+      // establish_connection and then break.
       std::cout << "[Client] The server is lost... Trying to reconnect!"
                 << std::endl;
       // Set the flag to be true.
@@ -618,28 +684,31 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
   }
 }
 
-void fake_tcp::Party::send_file_content(unsigned char* buffer,
-                                        const uint32_t& length) {
-  // Build a send buffer.
-  unsigned char* send_buf = new unsigned char[length + HEADER_SIZE];
-  bzero(send_buf, HEADER_SIZE + length);
-  const uint32_t sequence_number = cur_sequence++ % UINT32_MAX;
+void fake_tcp::Party::send_file_content(
+    const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
+    const uint32_t& start) {
+  uint32_t cur = start;
+  for (auto buffer : buffer_) {
+    // Build a send buffer.
+    unsigned char* send_buf = new unsigned char[buffer.second + HEADER_SIZE];
+    bzero(send_buf, HEADER_SIZE + buffer.second);
+    const uint32_t sequence_number = cur++;
 
-  // Set message header.
-  *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
-  *((uint8_t*)(send_buf + 1)) = fake_tcp::FILE_FLAG;
-  *((uint16_t*)(send_buf + 2)) = 0b0;
-  *((uint32_t*)(send_buf + 4)) = sequence_number;
-  *((uint32_t*)(send_buf + 12)) = length;
+    // Set message header.
+    *((uint8_t*)(send_buf)) = PROTOCOL_VERSION;
+    *((uint8_t*)(send_buf + 1)) = fake_tcp::FILE_FLAG;
+    *((uint16_t*)(send_buf + 2)) = 0b0;
+    *((uint32_t*)(send_buf + 4)) = sequence_number;
+    *((uint32_t*)(send_buf + 12)) = buffer.second;
 
-  // Append the message body to the header.
-  memcpy(send_buf + HEADER_SIZE, buffer, length);
-  bool context = false;
-  do_check(&context, src_ip, dst_ip, send_buf, length + HEADER_SIZE);
+    // Append the message body to the header.
+    memcpy(send_buf + HEADER_SIZE, buffer.first, buffer.second);
+    bool context = false;
+    do_check(&context, src_ip, dst_ip, send_buf, buffer.second + HEADER_SIZE);
+    send(socket, send_buf, buffer.second + HEADER_SIZE, 0);
 
-  send(socket, send_buf, length + HEADER_SIZE, 0);
-  // A timer.
-  std::this_thread::sleep_for(TIMEOUT);
+    std::this_thread::sleep_for(TIMEOUT);
+  }
 }
 
 fake_tcp::Party::~Party() {
