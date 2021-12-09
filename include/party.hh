@@ -112,10 +112,12 @@ class Party final {
 
   uint32_t window_size;
 
+  uint32_t last_acked;
+
   // Prevent that a buffer is resent.
   fixed_queue<uint32_t, 0xff> received_sequences;
 
-  std::vector<unsigned char*> storage;
+  std::vector<std::pair<unsigned char*, uint32_t>> storage;
 
   std::vector<std::ofstream> upload_files;
 
@@ -124,6 +126,8 @@ class Party final {
   size_t maximum_storage_size;
 
   //========== Functions ===========//
+  void check_storage_full(bool force_clear = false);
+
   void init(const std::string& address, const std::string& port);
 
   void run_server(void);

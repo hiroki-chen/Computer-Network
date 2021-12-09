@@ -45,7 +45,7 @@ void fake_tcp::Party::handle_batch_ack(
   uint32_t acked = 0;
   std::unordered_map<uint32_t, bool> map = std::move(get_hashmap(left, right));
 
-  while (acked < map.size()) {
+  do {
     send_file_content(buffer_, cur_sequence);
     std::this_thread::sleep_for(2 * TIMEOUT);
 
@@ -63,26 +63,31 @@ void fake_tcp::Party::handle_batch_ack(
         } else {
           // ACK received. Check validity.
           uint32_t ack = *((uint32_t*)(recv_buf + 8));
+          uint32_t window_size = *((uint32_t*)(recv_buf + 16));
+          this->window_size = window_size;
+          std::cout << "[Client] Current window size is " << window_size
+                    << std::endl;
 
-          if (map.count(ack) == 0) {
-            std::cout << "[Client] Received garbage message. Discard."
-                      << std::endl;
-          } else if (map[ack] == true) {
+          if (map.count(ack - 1) == 0) {
+            std::cout << "[Client] Received garbage message. Discard. ACK = "
+                      << ack << std::endl;
+          } else if (map[ack - 1] == true) {
             std::cout << "[Client] Received repeated ack. Discard."
                       << std::endl;
           } else {
+            std::cout << "[Client] Received valid ack!" << std::endl;
+            // std::cout << ack << std::endl;
             acked++;
-            map[ack] = true;
+            map[ack - 1] = true;
 
-            if (ack == map.size()) {
+            if (acked == map.size()) {
               return;
             }
-            std::cout << "[Client] Received valid ack!" << std::endl;
           }
         }
       }
     }
-  }
+  } while (true);
 }
 
 fake_tcp::Party::Party(const cxxopts::ParseResult& result)
@@ -93,7 +98,8 @@ fake_tcp::Party::Party(const cxxopts::ParseResult& result)
       window_left(0ul),
       window_right(MAXIMUM_WINDOW_SIZE),
       window_size(MAXIMUM_WINDOW_SIZE),
-      next_sequence(0ul) {
+      next_sequence(0ul),
+      last_acked(0ul) {
   // Get necessary parameters.
   const std::string address = result["address"].as<std::string>();
   const std::string port = result["port"].as<std::string>();
@@ -204,7 +210,7 @@ int fake_tcp::Party::establish_connection_server(const uint32_t& sequence) {
 
     if (flag == fake_tcp::ACK_FLAG && ack == sequence + 1) {
       std::cout << "[Server] Connection established!" << std::endl;
-      storage.emplace_back(new unsigned char[STORAGE_SIZE]);
+
       established = true;
       return 0;
     } else if (flag == fake_tcp::BEGIN_FLAG) {
@@ -304,6 +310,22 @@ int fake_tcp::Party::connect_to_server() {
   }
 
   return 0;
+}
+
+void fake_tcp::Party::check_storage_full(bool force_clear) {
+  if (storage.size() == MAXIMUM_WINDOW_SIZE / BUFFER_SIZE || force_clear) {
+    std::cout << "[Server] Flushing the cache..." << std::endl;
+    for (auto item : storage) {
+      upload_files.back().write(reinterpret_cast<char*>(item.first),
+                                item.second);
+      upload_files.back().flush();
+    }
+    storage.clear();
+  }
+
+  if (force_clear && !upload_files.empty()) {
+    upload_files.back().close();
+  }
 }
 
 void fake_tcp::Party::response_server(unsigned char* message,
@@ -422,11 +444,12 @@ void fake_tcp::Party::response_server(unsigned char* message,
       next_sequence++;
       // Push to the queue.
       received_sequences.push_back(seq);
-      // Write to the file.
-      char* data = reinterpret_cast<char*>(message + HEADER_SIZE);
       const uint32_t message_len = *((uint32_t*)(message + 12));
-      upload_files.back().write(data, message_len);
-      upload_files.back().flush();
+      // Write to the storage.
+      unsigned char* data = new unsigned char[message_len];
+      memcpy(data, message + HEADER_SIZE, message_len);
+      storage.emplace_back(data, message_len);
+      check_storage_full();
 
       // Send back ack.
       unsigned char* send_buf = new unsigned char[HEADER_SIZE];
@@ -436,6 +459,8 @@ void fake_tcp::Party::response_server(unsigned char* message,
       *((uint8_t*)(send_buf + 1)) = fake_tcp::ACK_FLAG;
       *((uint16_t*)(send_buf + 2)) = 0b0;
       *((uint32_t*)(send_buf + 8)) = (seq + 1) % 0xffffffff;
+      *((uint32_t*)(send_buf + 16)) =
+          MAXIMUM_WINDOW_SIZE / BUFFER_SIZE - storage.size();
 
       bool context = false;
       do_check(&context, fake_tcp::dst_ip, fake_tcp::src_ip, send_buf,
@@ -454,6 +479,7 @@ void fake_tcp::Party::response_server(unsigned char* message,
                 << "!" << std::endl;
 
       received_sequences.clear();
+      check_storage_full(true);
 
       // Send back the ack flag.
       unsigned char* send_buf = new unsigned char[HEADER_SIZE];
@@ -465,7 +491,7 @@ void fake_tcp::Party::response_server(unsigned char* message,
       *((uint32_t*)(send_buf + 4)) = seq;
       *((uint32_t*)(send_buf + 8)) = seq + 1;
       // Set window size.
-      *((uint32_t*)(send_buf + 16)) = MAXIMUM_WINDOW_SIZE;
+      *((uint32_t*)(send_buf + 16)) = MAXIMUM_WINDOW_SIZE / BUFFER_SIZE;
 
       std::cout << "[Server] Sending back with ACK " << seq + 1 << std::endl;
 
@@ -540,12 +566,12 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
       auto begin = std::chrono::high_resolution_clock::now();
       bool finish = false;
       while (!finish) {
-        const uint32_t packet_num = (window_right - window_left) / BUFFER_SIZE;
-
         // Create a buffer pool.
         std::vector<std::pair<unsigned char*, uint32_t>> buffer_;
 
-        for (uint32_t i = 0; i < packet_num; i++) {
+        std::cout << window_size << std::endl;
+
+        for (uint32_t i = 0; i < window_size; i++) {
           bzero(send_buf, BUFFER_SIZE - HEADER_SIZE);
           // Read 1024 - HEADERSIZE bytes from the file.
           // Reserve some place for the buffer.
@@ -570,6 +596,8 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
         // Set and current sent window.
         uint32_t left = cur_sequence;
         uint32_t right = cur_sequence + buffer_.size() - 1;
+
+        std::cout << left << ", " << right << std::endl;
 
         handle_batch_ack(left, right, buffer_, cur_sequence);
         // Increment.
@@ -653,6 +681,7 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
           const uint32_t window_size_cur = *((uint32_t*)(recv_buffer + 16));
           std::cout << "[Client] Current window size is " << window_size_cur
                     << std::endl;
+          window_size = window_size_cur;
           break;
         }
       }
