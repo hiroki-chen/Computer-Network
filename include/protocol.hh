@@ -24,7 +24,7 @@
 #define HEADER_SIZE sizeof(fake_tcp::ProtocolHeader)
 #define PSEUDO_SIZE sizeof(fake_tcp::PseudoHeader)
 #define BUFFER_SIZE 8096
-#define MAXIMUM_WINDOW_SIZE 0x10 * BUFFER_SIZE
+#define MAXIMUM_WINDOW_SIZE 0x20 * BUFFER_SIZE
 #define TIMEOUT 20ms
 
 #include <arpa/inet.h>

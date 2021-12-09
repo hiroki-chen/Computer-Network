@@ -114,6 +114,11 @@ class Party final {
 
   uint32_t last_acked;
 
+  // For congestion avoidance algorithm (Tahoe)
+  uint32_t congestion_window_size;
+
+  uint32_t ssthresh;
+
   // Prevent that a buffer is resent.
   fixed_queue<uint32_t, 0xff> received_sequences;
 
@@ -142,7 +147,7 @@ class Party final {
       const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
       const uint32_t& start);
 
-  void handle_batch_ack(
+  bool handle_batch_ack(
       const uint32_t& left, const uint32_t& right,
       const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
       const uint32_t& cur_sequence);

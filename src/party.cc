@@ -38,56 +38,85 @@ static std::unordered_map<uint32_t, bool> get_hashmap(const uint32_t& left,
   return ret;
 }
 
-void fake_tcp::Party::handle_batch_ack(
+bool fake_tcp::Party::handle_batch_ack(
     const uint32_t& left, const uint32_t& right,
     const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
     const uint32_t& cur_sequence) {
   uint32_t acked = 0;
   std::unordered_map<uint32_t, bool> map = std::move(get_hashmap(left, right));
 
-  do {
-    send_file_content(buffer_, cur_sequence);
-    std::this_thread::sleep_for(2 * TIMEOUT);
+  send_file_content(buffer_, cur_sequence);
+  std::this_thread::sleep_for(2 * TIMEOUT);
 
-    uint32_t attempted = 0;
+  uint32_t attempted = 0;
+  uint32_t repeated_time = 0;
 
-    while (attempted++ <= 5 * map.size()) {
-      unsigned char* recv_buf = new unsigned char[HEADER_SIZE];
-      if (handle_recv(socket, recv_buf, &addr, &dst_addr) == 0) {
-        // Status ok, check ack flag.
-        uint8_t flag = *((uint8_t*)(recv_buf + 1));
+  while (attempted++ <= 5 * map.size()) {
+    unsigned char* recv_buf = new unsigned char[HEADER_SIZE];
+    if (handle_recv(socket, recv_buf, &addr, &dst_addr) == 0) {
+      // Status ok, check ack flag.
+      uint8_t flag = *((uint8_t*)(recv_buf + 1));
 
-        if (flag != ACK_FLAG) {
-          std::cout << "[Client] Received garbage message. Discard."
-                    << std::endl;
-        } else {
-          // ACK received. Check validity.
-          uint32_t ack = *((uint32_t*)(recv_buf + 8));
-          uint32_t window_size = *((uint32_t*)(recv_buf + 16));
-          this->window_size = window_size;
-          std::cout << "[Client] Current window size is " << window_size
-                    << std::endl;
+      if (flag != ACK_FLAG) {
+        std::cout << "[Client] Received garbage message. Discard." << std::endl;
+      } else {
+        // ACK received. Check validity.
+        uint32_t ack = *((uint32_t*)(recv_buf + 8));
+        uint32_t window_size = *((uint32_t*)(recv_buf + 16));
+        this->window_size = window_size;
+        std::cout << "[Client] Current window size is " << window_size
+                  << std::endl;
 
-          if (map.count(ack - 1) == 0) {
-            std::cout << "[Client] Received garbage message. Discard. ACK = "
-                      << ack << std::endl;
-          } else if (map[ack - 1] == true) {
-            std::cout << "[Client] Received repeated ack. Discard."
+        if (map.count(ack - 1) == 0) {
+          std::cout << "[Client] Received garbage message. Discard. ACK = "
+                    << ack << std::endl;
+        } else if (map[ack - 1] == true) {
+          std::cout << "[Client] Received repeated ack. Discard." << std::endl;
+          // Triple ack. Move to fast recover.
+          if (++repeated_time == 3) {
+            std::cout << "[Client] Received repeated ack for three times. "
+                         "Move into fast-recover phase."
                       << std::endl;
-          } else {
-            std::cout << "[Client] Received valid ack!" << std::endl;
-            // std::cout << ack << std::endl;
-            acked++;
-            map[ack - 1] = true;
+            ssthresh = congestion_window_size >> 1;
+            congestion_window_size = ssthresh + 3;
+            // Sent failed.
+            return false;
+          }
+        } else {
+          std::cout << "[Client] Received valid ack!" << std::endl;
 
-            if (acked == map.size()) {
-              return;
+          if (congestion_window_size <= ssthresh) {
+            congestion_window_size += 1;
+          } else {
+            congestion_window_size += 1 / congestion_window_size;
+            // Actually this does nothing :P
+          }
+
+          acked++;
+          map[ack - 1] = true;
+
+          if (acked == map.size()) {
+            // Check threshold.
+            // std::cout << ssthresh << std::endl;
+            if (congestion_window_size <= ssthresh) {
+              congestion_window_size *= 2;
+            } else {
+              // Congestion avoidance...
+              congestion_window_size += 1;
             }
+            // Succeeded.
+            return true;
           }
         }
       }
     }
-  } while (true);
+  }
+
+  std::cout << "[Client] Congestion due to timeout! Move to slow start mode..."
+            << std::endl;
+  ssthresh = congestion_window_size >> 1;
+  congestion_window_size = 1ul;
+  return false;
 }
 
 fake_tcp::Party::Party(const cxxopts::ParseResult& result)
@@ -99,7 +128,9 @@ fake_tcp::Party::Party(const cxxopts::ParseResult& result)
       window_right(MAXIMUM_WINDOW_SIZE),
       window_size(MAXIMUM_WINDOW_SIZE),
       next_sequence(0ul),
-      last_acked(0ul) {
+      last_acked(0ul),
+      congestion_window_size(1ul),
+      ssthresh(1 << 8) {
   // Get necessary parameters.
   const std::string address = result["address"].as<std::string>();
   const std::string port = result["port"].as<std::string>();
@@ -569,9 +600,15 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
         // Create a buffer pool.
         std::vector<std::pair<unsigned char*, uint32_t>> buffer_;
 
-        std::cout << window_size << std::endl;
+        std::cout
+            << "[Client] Trying to send batch data... Current window size is "
+            << window_size << ", congestion window size is "
+            << congestion_window_size << std::endl;
 
-        for (uint32_t i = 0; i < window_size; i++) {
+        // Backup the previous file pointer.
+        auto prev = file.tellg();
+        for (uint32_t i = 0; i < std::min(window_size, congestion_window_size);
+             i++) {
           bzero(send_buf, BUFFER_SIZE - HEADER_SIZE);
           // Read 1024 - HEADERSIZE bytes from the file.
           // Reserve some place for the buffer.
@@ -597,11 +634,16 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
         uint32_t left = cur_sequence;
         uint32_t right = cur_sequence + buffer_.size() - 1;
 
-        std::cout << left << ", " << right << std::endl;
-
-        handle_batch_ack(left, right, buffer_, cur_sequence);
-        // Increment.
-        cur_sequence += buffer_.size();
+        if (handle_batch_ack(left, right, buffer_, cur_sequence)) {
+          // Increment.
+          cur_sequence += buffer_.size();
+        } else {
+          // Failed due to congestion.
+          // Reset the file pointer.
+          std::cout << "[Client] Congestion detected! Resend packets..."
+                    << std::endl;
+          file.seekg(prev, std::fstream::beg);
+        }
       }
       auto end = std::chrono::high_resolution_clock::now();
       double elapsed = std::chrono::duration<double>(end - begin).count();
