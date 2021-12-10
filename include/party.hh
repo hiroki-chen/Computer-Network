@@ -117,7 +117,7 @@ class Party final {
   // Prevent that a buffer is resent.
   fixed_queue<uint32_t, 0xff> received_sequences;
 
-  std::vector<std::pair<unsigned char*, uint32_t>> storage;
+  std::map<uint32_t, std::pair<unsigned char*, uint32_t>> storage;
 
   std::vector<std::ofstream> upload_files;
 
@@ -140,19 +140,19 @@ class Party final {
 
   void send_file_content(
       const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
-      const uint32_t& start);
+      const uint32_t& start, const std::unordered_map<uint32_t, bool>& map);
 
   void handle_batch_ack(
       const uint32_t& left, const uint32_t& right,
-      const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
+      std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
       const uint32_t& cur_sequence);
 
-      /**
-       * @brief When an SYN packet is received, the server will try to establish
-       * a connection with the client.
-       *
-       */
-      int establish_connection_server(const uint32_t& sequence);
+  /**
+   * @brief When an SYN packet is received, the server will try to establish
+   * a connection with the client.
+   *
+   */
+  int establish_connection_server(const uint32_t& sequence);
 
   int establish_connection_client(const uint32_t& sequence);
 

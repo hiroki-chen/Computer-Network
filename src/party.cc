@@ -40,18 +40,18 @@ static std::unordered_map<uint32_t, bool> get_hashmap(const uint32_t& left,
 
 void fake_tcp::Party::handle_batch_ack(
     const uint32_t& left, const uint32_t& right,
-    const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
+    std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
     const uint32_t& cur_sequence) {
   uint32_t acked = 0;
   std::unordered_map<uint32_t, bool> map = std::move(get_hashmap(left, right));
 
   do {
-    send_file_content(buffer_, cur_sequence);
+    send_file_content(buffer_, cur_sequence, map);
     std::this_thread::sleep_for(2 * TIMEOUT);
 
     uint32_t attempted = 0;
 
-    while (attempted++ <= 5 * map.size()) {
+    while (attempted++ <= 3 * map.size()) {
       unsigned char* recv_buf = new unsigned char[HEADER_SIZE];
       if (handle_recv(socket, recv_buf, &addr, &dst_addr) == 0) {
         // Status ok, check ack flag.
@@ -316,8 +316,9 @@ void fake_tcp::Party::check_storage_full(bool force_clear) {
   if (storage.size() == MAXIMUM_WINDOW_SIZE / BUFFER_SIZE || force_clear) {
     std::cout << "[Server] Flushing the cache..." << std::endl;
     for (auto item : storage) {
-      upload_files.back().write(reinterpret_cast<char*>(item.first),
-                                item.second);
+      auto buff = item.second;
+      upload_files.back().write(reinterpret_cast<char*>(buff.first),
+                                buff.second);
       upload_files.back().flush();
     }
     storage.clear();
@@ -434,21 +435,20 @@ void fake_tcp::Party::response_server(unsigned char* message,
 
       std::cout << "[Server] Received one batch of the message." << std::endl;
       // Check if this message is out of order.
-      if (next_sequence != seq) {
-        std::cout
-            << "[Server] Sequence does not match the expected one. Discard."
-            << std::endl;
-        return;
+      if (next_sequence == seq) {
+        std::cout << "[Server] Sequence does match the expected one."
+                  << std::endl;
+        // Increment the next sequence expected.
+        next_sequence++;
       }
-      // Increment the next sequence expected.
-      next_sequence++;
+
       // Push to the queue.
       received_sequences.push_back(seq);
       const uint32_t message_len = *((uint32_t*)(message + 12));
       // Write to the storage.
       unsigned char* data = new unsigned char[message_len];
       memcpy(data, message + HEADER_SIZE, message_len);
-      storage.emplace_back(data, message_len);
+      storage[seq] = std::make_pair(data, message_len);
       check_storage_full();
 
       // Send back ack.
@@ -532,7 +532,7 @@ void fake_tcp::Party::send_file(const std::string& path_prefix) {
   // Set default timeout for the socket. Just for convenience.
   struct timeval timeout;
   timeout.tv_sec = 0;
-  timeout.tv_usec = 1000000;
+  timeout.tv_usec = 100000;
   // Try to set the timeout.
   setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
@@ -715,9 +715,14 @@ void fake_tcp::Party::send_file_information(const std::string& file_name) {
 
 void fake_tcp::Party::send_file_content(
     const std::vector<std::pair<unsigned char*, uint32_t>>& buffer_,
-    const uint32_t& start) {
+    const uint32_t& start, const std::unordered_map<uint32_t, bool>& map) {
   uint32_t cur = start;
   for (auto buffer : buffer_) {
+    if (map.at(cur) != 0) {
+      cur++;
+      continue;
+    }
+
     // Build a send buffer.
     unsigned char* send_buf = new unsigned char[buffer.second + HEADER_SIZE];
     bzero(send_buf, HEADER_SIZE + buffer.second);
