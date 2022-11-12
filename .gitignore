@@ -1,0 +1,8 @@
+Debug
+build
+*.pdf
+*.zip
+upload
+test
+.DS_Store
+
